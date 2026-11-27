@@ -1,3 +1,4 @@
+/* global MessageChannel */
 import { CPU } from "./cpu.js";
 import { save_state, restore_state } from "./state.js";
 export { V86 } from "./browser/starter.js";
