@@ -1,3 +1,4 @@
+/* global self */
 import { V86 } from "../main.js";
 import { WorkerScreen } from "./browseros-worker-screen.js";
 
