@@ -891,7 +891,12 @@ export function ScreenAdapter(options, screen_fill_buffer, request_full_redraw)
         graphic_screen.width = width;
         graphic_screen.height = height;
 
-        if(gpu && !gpu.resize()) fallback_to_canvas();
+        if(gpu)
+        {
+            if(!gpu.resize()) fallback_to_canvas();
+            // Resizing reallocates the texture, so the next frame must repaint it.
+            needs_full_redraw = true;
+        }
 
         // graphic_context must be reconfigured whenever its graphic_screen is resized
         graphic_context.imageSmoothingEnabled = false;
