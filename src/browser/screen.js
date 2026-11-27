@@ -1,6 +1,150 @@
 import { dbg_assert } from "../log.js";
 import { get_charmap } from "../lib.js";
 
+// Experimental host-side framebuffer presentation. Guest VGA emulation is unchanged.
+// A persistent texture retains pixels outside dirty rectangles.
+/**
+ * @param {!HTMLCanvasElement} canvas
+ * @return {?Object}
+ */
+function create_webgl_presenter(canvas)
+{
+    const gl = /** @type {?WebGLRenderingContext} */ (canvas.getContext("webgl", {
+        alpha: false, antialias: false, depth: false, stencil: false,
+        preserveDrawingBuffer: true, failIfMajorPerformanceCaveat: true
+    }));
+    if(!gl) return null;
+
+    function shader(type, source)
+    {
+        const result = gl.createShader(type);
+        gl.shaderSource(result, source);
+        gl.compileShader(result);
+        if(!gl.getShaderParameter(result, gl.COMPILE_STATUS))
+        {
+            gl.deleteShader(result);
+            return null;
+        }
+        return result;
+    }
+
+    const vs = shader(gl.VERTEX_SHADER,
+        "attribute vec2 p; varying vec2 uv; void main(){gl_Position=vec4(p,0.,1.);uv=vec2((p.x+1.)*.5,(1.-p.y)*.5);}");
+    const fs = shader(gl.FRAGMENT_SHADER,
+        "precision mediump float; varying vec2 uv; uniform sampler2D tex; void main(){gl_FragColor=vec4(texture2D(tex,uv).rgb,1.);}");
+    if(!vs || !fs)
+    {
+        if(vs) gl.deleteShader(vs);
+        if(fs) gl.deleteShader(fs);
+        return null;
+    }
+    const program = gl.createProgram();
+    gl.attachShader(program, vs);
+    gl.attachShader(program, fs);
+    gl.linkProgram(program);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    if(!gl.getProgramParameter(program, gl.LINK_STATUS))
+    {
+        gl.deleteProgram(program);
+        return null;
+    }
+
+    const vertices = gl.createBuffer();
+    const texture = gl.createTexture();
+    gl.useProgram(program);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vertices);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+    const attr = gl.getAttribLocation(program, "p");
+    gl.enableVertexAttribArray(attr);
+    gl.vertexAttribPointer(attr, 2, gl.FLOAT, false, 0, 0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.uniform1i(gl.getUniformLocation(program, "tex"), 0);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+
+    const max_size = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
+    let width = 0, height = 0;
+    let scratch = new Uint8Array(0);
+
+    function resize()
+    {
+        width = canvas.width;
+        height = canvas.height;
+        if(!width || !height || width > max_size || height > max_size || gl.isContextLost()) return false;
+        gl.viewport(0, 0, width, height);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        return gl.getError() === gl.NO_ERROR;
+    }
+
+    function draw()
+    {
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    }
+
+    function update(layers)
+    {
+        if(gl.isContextLost()) return false;
+        let dirty = false;
+        for(const layer of layers)
+        {
+            const image = layer.image_data;
+            // Clip source AND destination, matching putImageData's dirty-rect semantics.
+            const left = Math.max(0, -layer.buffer_x, -layer.screen_x);
+            const top = Math.max(0, -layer.buffer_y, -layer.screen_y);
+            const right = Math.min(layer.buffer_width, image.width - layer.buffer_x, width - layer.screen_x);
+            const bottom = Math.min(layer.buffer_height, image.height - layer.buffer_y, height - layer.screen_y);
+            const w = right - left, h = bottom - top;
+            if(w <= 0 || h <= 0) continue;
+            const sx = layer.buffer_x + left, sy = layer.buffer_y + top;
+            const data = new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength);
+            const row_bytes = w * 4;
+            let pixels;
+            if(sx === 0 && w === image.width)
+            {
+                // Common SVGA path: view contiguous dirty rows without copying.
+                const offset = sy * image.width * 4;
+                pixels = data.subarray(offset, offset + row_bytes * h);
+            }
+            else
+            {
+                // WebGL 1 has no UNPACK_ROW_LENGTH. Reuse one staging allocation.
+                const size = row_bytes * h;
+                if(scratch.length < size) scratch = new Uint8Array(size);
+                pixels = scratch.subarray(0, size);
+                for(let y = 0; y < h; y++)
+                {
+                    const offset = ((sy + y) * image.width + sx) * 4;
+                    pixels.set(data.subarray(offset, offset + row_bytes), y * row_bytes);
+                }
+            }
+            gl.texSubImage2D(gl.TEXTURE_2D, 0, layer.screen_x + left, layer.screen_y + top,
+                w, h, gl.RGBA, gl.UNSIGNED_BYTE, pixels);
+            dirty = true;
+        }
+        if(dirty) draw();
+        return !gl.isContextLost();
+    }
+
+    return {
+        resize,
+        update,
+        clear: resize,
+        destroy: () => {
+            gl.deleteTexture(texture);
+            gl.deleteBuffer(vertices);
+            gl.deleteProgram(program);
+            scratch = new Uint8Array(0);
+        }
+    };
+}
+
 // Draws entire buffer and visualizes the layers that would be drawn
 export const DEBUG_SCREEN_LAYERS = DEBUG && false;
 
@@ -9,8 +153,9 @@ export const DEBUG_SCREEN_LAYERS = DEBUG && false;
  * @constructor
  * @param {Object} options
  * @param {function()} screen_fill_buffer
+ * @param {function()=} request_full_redraw
  */
-export function ScreenAdapter(options, screen_fill_buffer)
+export function ScreenAdapter(options, screen_fill_buffer, request_full_redraw)
 {
     const screen_container = options.container;
     this.screen_fill_buffer = screen_fill_buffer;
@@ -39,7 +184,55 @@ export function ScreenAdapter(options, screen_fill_buffer)
         graphic_screen = document.createElement("canvas");
         screen_container.appendChild(graphic_screen);
     }
-    const graphic_context = graphic_screen.getContext("2d", { alpha: false });
+    const software_canvas = graphic_screen;
+    const graphic_context = software_canvas.getContext("2d", { alpha: false });
+    let gpu = null;
+    let needs_full_redraw = false;
+
+    // Keep the original 2D canvas intact for fallback. Graphical text and
+    // layer-debug mode continue using the original renderer.
+    if(options["renderer"] === "webgl" && !options.use_graphical_text && !DEBUG_SCREEN_LAYERS)
+    {
+        const candidate = /** @type {!HTMLCanvasElement} */ (software_canvas.cloneNode(false));
+        try
+        {
+            gpu = create_webgl_presenter(candidate);
+            if(gpu && gpu.resize())
+            {
+                software_canvas.parentNode.replaceChild(candidate, software_canvas);
+                graphic_screen = candidate;
+                candidate.addEventListener("webglcontextlost", fallback_to_canvas);
+            }
+            else if(gpu)
+            {
+                gpu.destroy();
+                gpu = null;
+            }
+        }
+        catch(e)
+        {
+            if(gpu) gpu.destroy();
+            gpu = null;
+        }
+    }
+
+    function fallback_to_canvas()
+    {
+        if(!gpu) return;
+        graphic_screen.removeEventListener("webglcontextlost", fallback_to_canvas);
+        software_canvas.width = graphic_screen.width;
+        software_canvas.height = graphic_screen.height;
+        software_canvas.style.cssText = graphic_screen.style.cssText;
+        graphic_context.imageSmoothingEnabled = false;
+        if(graphic_screen.parentNode)
+        {
+            graphic_screen.parentNode.replaceChild(software_canvas, graphic_screen);
+        }
+        graphic_screen = software_canvas;
+        gpu.destroy();
+        gpu = null;
+        needs_full_redraw = true;
+    }
 
     let text_screen = screen_container.getElementsByTagName("div")[0];
     if(!text_screen)
@@ -463,6 +656,11 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
     this.update_graphical = function()
     {
+        if(needs_full_redraw && request_full_redraw)
+        {
+            request_full_redraw();
+            needs_full_redraw = false;
+        }
         this.screen_fill_buffer();
     };
 
@@ -492,6 +690,9 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
     this.destroy = function()
     {
+        // Restore the original 2D canvas before another VM reuses this container.
+        // A canvas that has acquired a WebGL context cannot acquire a 2D context.
+        if(gpu) fallback_to_canvas();
         if(timer_id)
         {
             cancelAnimationFrame(timer_id);
@@ -584,6 +785,11 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
     this.clear_screen = function()
     {
+        if(gpu)
+        {
+            if(gpu.clear()) return;
+            fallback_to_canvas();
+        }
         graphic_context.fillStyle = "#000";
         graphic_context.fillRect(0, 0, graphic_screen.width, graphic_screen.height);
     };
@@ -684,6 +890,13 @@ export function ScreenAdapter(options, screen_fill_buffer)
 
         graphic_screen.width = width;
         graphic_screen.height = height;
+
+        if(gpu)
+        {
+            if(!gpu.resize()) fallback_to_canvas();
+            // Resizing reallocates the texture, so the next frame must repaint it.
+            needs_full_redraw = true;
+        }
 
         // graphic_context must be reconfigured whenever its graphic_screen is resized
         graphic_context.imageSmoothingEnabled = false;
@@ -922,6 +1135,12 @@ export function ScreenAdapter(options, screen_fill_buffer)
             }
             graphic_context.lineWidth = 1;
             return;
+        }
+
+        if(gpu)
+        {
+            if(gpu.update(layers)) return;
+            fallback_to_canvas();
         }
 
         for(const layer of layers)

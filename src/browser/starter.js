@@ -41,6 +41,14 @@ import { FS } from "../../lib/filesystem.js";
  */
 export function V86(options)
 {
+    // Never advertise processors that the current engine cannot execute.
+    // Keep this check before initialization so invalid configurations fail
+    // synchronously, rather than hanging during firmware/guest startup.
+    if(options["cpu_count"] !== undefined && options["cpu_count"] !== 1)
+    {
+        throw new RangeError("This v86 engine supports exactly one virtual CPU");
+    }
+
     if(typeof options.log_level === "number")
     {
         // XXX: Shared between all emulator instances
@@ -304,9 +312,16 @@ V86.prototype.continue_init = async function(emulator, options)
         this.absolute_pointer_enabled = enabled;
     }, this);
 
-    if(screen_options.container)
+    // Experimental Worker-owned emulator supplies a DOM-free screen adapter.
+    if(options["worker_screen_adapter"])
     {
-        this.screen_adapter = new ScreenAdapter(screen_options, () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer());
+        this.screen_adapter = options["worker_screen_adapter"];
+    }
+    else if(screen_options.container)
+    {
+        this.screen_adapter = new ScreenAdapter(screen_options,
+            () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer(),
+            () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.complete_redraw());
     }
     else if(screen_options.ansi)
     {

@@ -38,6 +38,13 @@ type V86AsyncFileImage =
          * Fixed chunk size, useful with `use_parts: true` for GitHub Pages users.
          */
         fixed_chunk_size?: number;
+
+        /**
+         * Optional budget for automatically cached clean disk reads, in bytes.
+         * Omit to preserve upstream behavior; zero disables automatic read caching.
+         * Explicitly pinned blocks and guest writes are excluded from this budget.
+         */
+        read_cache_bytes?: number;
     };
 
 /**
@@ -124,6 +131,13 @@ export type ScreenConfig =
          * @default false
          */
         use_graphical_text?: boolean;
+
+        /**
+         * Experimental host framebuffer renderer. WebGL falls back to Canvas 2D
+         * if unavailable or lost. Does not accelerate guest OpenGL or Direct3D.
+         * @default "canvas"
+         */
+        renderer?: "canvas" | "webgl";
 
         /**
          * Use ANSI Truecolor codes for text mode output.
@@ -343,6 +357,9 @@ type V86NetworkDevice =
  * Emulator instance constructor options.
  */
 export interface V86Options {
+    /** Virtual CPU count. Only one CPU is supported until SMP is implemented. */
+    cpu_count?: 1;
+
     /**
      * Reference to the v86 wasm exported function.
      */

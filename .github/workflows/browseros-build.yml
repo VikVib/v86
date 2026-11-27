@@ -1,0 +1,71 @@
+name: BrowserOS engine build
+
+on:
+  push:
+    branches: [performance]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: browseros-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Do not run this workflow outside the BrowserOS fork.
+    if: github.repository == 'VikVib/v86'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24.17.0'
+      - name: Set up compiler toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          rustup component add rustfmt
+          rustc --version
+          clang --version
+          java -version
+      - name: Check JS and run isolated regressions
+        run: |
+          for file in src/main.js src/buffer.js src/cpu.js src/browser/screen.js src/browser/starter.js src/browser/browseros-*.js tests/api/browseros-*.js; do
+            node --check "$file"
+          done
+          node tests/api/browseros-memory.js
+          node tests/api/browseros-worker-screen.js
+      - name: Compile debug, optimized and fallback WASM and JavaScript
+        run: |
+          make all-debug
+          make all
+          make build/v86-fallback.wasm
+          test -s build/v86-fallback.wasm
+      - name: Check Rust regressions
+        run: cargo test --lib destination_tests -- --nocapture
+      - name: Run compiled engine smoke tests
+        run: |
+          for mode in debug release fallback; do
+            BROWSEROS_BUILD="$mode" node tests/api/browseros-engine-smoke.js
+          done
+      - name: Record build manifest
+        run: |
+          git rev-parse HEAD > build/browseros-commit.txt
+          sha256sum build/libv86*.js build/libv86*.mjs build/v86*.wasm > build/browseros-sha256.txt
+      - name: Upload tested engine binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: browseros-engine-${{ github.sha }}
+          path: |
+            build/libv86*.js
+            build/libv86*.mjs
+            build/v86*.wasm
+            build/browseros-*.txt
+            LICENSE
+            v86.d.ts
+          if-no-files-found: error

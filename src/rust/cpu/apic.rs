@@ -22,7 +22,7 @@ const DELIVERY_MODES: [&str; 8] = [
     "Reserved (3)",
     "NMI (4)",
     "INIT (5)",
-    "Reserved (6)",
+    "Startup (6)",
     "ExtINT (7)",
 ];
 
@@ -33,6 +33,7 @@ const IOAPIC_CONFIG_MASKED: u32 = 0x10000;
 const IOAPIC_DELIVERY_INIT: u8 = 5;
 const IOAPIC_DELIVERY_NMI: u8 = 4;
 const IOAPIC_DELIVERY_FIXED: u8 = 0;
+const IPI_DELIVERY_STARTUP: u8 = 6;
 
 // keep in sync with cpu.js
 #[allow(dead_code)]
@@ -360,6 +361,13 @@ fn write32_internal(apic: &mut Apic, addr: u32, value: u32) {
             value &= !(1 << 12);
             apic.icr0 = value;
 
+            // SIPI starts an application processor, not a normal interrupt.
+            // This engine has only the bootstrap processor today. Do not inject
+            // the startup vector into its IRR (or pretend an AP exists).
+            if delivery_mode == IPI_DELIVERY_STARTUP {
+                return;
+            }
+
             if destination_shorthand == 0 {
                 // no shorthand
                 route(
@@ -532,16 +540,44 @@ fn timer(apic: &mut Apic, now: f64) -> f64 {
     apic.timer_last_tick + time_per_interrupt - now
 }
 
+// xAPIC physical destination selects an APIC ID or the broadcast ID.
+// This pure helper is also usable by a future per-vCPU APIC dispatcher.
+fn physical_destination_matches(apic_id: u8, destination: u8) -> bool {
+    destination == 0xFF || destination == apic_id
+}
+
 pub fn route(
     apic: &mut Apic,
     vector: u8,
     mode: u8,
     is_level: bool,
-    _destination: u8,
-    _destination_mode: u8,
+    destination: u8,
+    destination_mode: u8,
 ) {
-    // TODO
+    // Physical addressing must not redirect an interrupt intended for an
+    // absent processor to the BSP. Preserve the existing logical-mode behavior
+    // until the flat/cluster logical destination model is implemented.
+    if destination_mode == 0
+        && !physical_destination_matches((apic.apic_id >> 24) as u8, destination)
+    {
+        return;
+    }
     deliver(apic, vector, mode, is_level);
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::physical_destination_matches;
+
+    #[test]
+    fn physical_unicast_and_broadcast() {
+        assert!(physical_destination_matches(0, 0));
+        assert!(!physical_destination_matches(0, 1));
+        assert!(physical_destination_matches(1, 1));
+        assert!(!physical_destination_matches(1, 0));
+        assert!(physical_destination_matches(0, 0xFF));
+        assert!(physical_destination_matches(7, 0xFF));
+    }
 }
 
 fn deliver(apic: &mut Apic, vector: u8, mode: u8, is_level: bool) {

@@ -892,26 +892,34 @@ CPU.prototype.pack_memory = function()
 {
     dbg_assert((this.mem8.length & 0xFFF) === 0);
 
-    const page_count = this.mem8.length >> 12;
-    const nonzero_pages = [];
+    const page_count = this.mem8.length / 0x1000;
+    const bitmap = new Bitmap(page_count);
+    let nonzero_count = 0;
     for(let page = 0; page < page_count; page++)
     {
-        if(!this.is_memory_zeroed(page << 12, 0x1000))
+        if(!this.is_memory_zeroed(page * 0x1000, 0x1000))
         {
-            nonzero_pages.push(page);
+            bitmap.set(page, 1);
+            nonzero_count++;
         }
     }
 
-    const bitmap = new Bitmap(page_count);
-    const packed_memory = new Uint8Array(nonzero_pages.length << 12);
-
-    for(const [i, page] of nonzero_pages.entries())
+    const packed_memory = new Uint8Array(nonzero_count * 0x1000);
+    let packed_offset = 0;
+    for(let page = 0; page < page_count;)
     {
-        bitmap.set(page, 1);
-
-        const offset = page << 12;
-        const page_contents = this.mem8.subarray(offset, offset + 0x1000);
-        packed_memory.set(page_contents, i << 12);
+        if(!bitmap.get(page))
+        {
+            page++;
+            continue;
+        }
+        // Copy consecutive nonzero pages in one operation instead of allocating
+        // a separate typed-array view for every 4 KiB page.
+        const start = page++;
+        while(page < page_count && bitmap.get(page)) page++;
+        const bytes = this.mem8.subarray(start * 0x1000, page * 0x1000);
+        packed_memory.set(bytes, packed_offset);
+        packed_offset += bytes.length;
     }
 
     return { bitmap, packed_memory };
@@ -921,18 +929,20 @@ CPU.prototype.unpack_memory = function(bitmap, packed_memory)
 {
     this.zero_memory(0, this.memory_size[0]);
 
-    const page_count = this.memory_size[0] >> 12;
-    let packed_page = 0;
-
-    for(let page = 0; page < page_count; page++)
+    const page_count = this.memory_size[0] / 0x1000;
+    let packed_offset = 0;
+    for(let page = 0; page < page_count;)
     {
-        if(bitmap.get(page))
+        if(!bitmap.get(page))
         {
-            const offset = packed_page << 12;
-            const view = packed_memory.subarray(offset, offset + 0x1000);
-            this.mem8.set(view, page << 12);
-            packed_page++;
+            page++;
+            continue;
         }
+        const start = page++;
+        while(page < page_count && bitmap.get(page)) page++;
+        const length = (page - start) * 0x1000;
+        this.mem8.set(packed_memory.subarray(packed_offset, packed_offset + length), start * 0x1000);
+        packed_offset += length;
     }
 };
 
