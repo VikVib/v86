@@ -67,7 +67,7 @@ function create_webgl_presenter(canvas)
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
 
-    const max_size = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    const max_size = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE));
     let width = 0, height = 0;
     let scratch = new Uint8Array(0);
 
