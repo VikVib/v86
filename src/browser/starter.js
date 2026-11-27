@@ -41,6 +41,14 @@ import { FS } from "../../lib/filesystem.js";
  */
 export function V86(options)
 {
+    // Never advertise processors that the current engine cannot execute.
+    // Keep this check before initialization so invalid configurations fail
+    // synchronously, rather than hanging during firmware/guest startup.
+    if(options["cpu_count"] !== undefined && options["cpu_count"] !== 1)
+    {
+        throw new RangeError("This v86 engine supports exactly one virtual CPU");
+    }
+
     if(typeof options.log_level === "number")
     {
         // XXX: Shared between all emulator instances
