@@ -124,6 +124,53 @@ else if(globalThis["scheduler"] && typeof globalThis["scheduler"]["postTask"] ==
     v86.prototype.register_yield = function() {};
     v86.prototype.unregister_yield = function() {};
 }
+else if(typeof MessageChannel !== "undefined" && typeof location !== "undefined" &&
+        location.href.includes("use-message-channel"))
+{
+    // Experimental local scheduler: avoid a cross-thread round trip per CPU slice.
+    // A task boundary still separates slices, and delayed HLT wakeups use a timer.
+    v86.prototype.register_yield = function()
+    {
+        this.yield_channel = new MessageChannel();
+        this.yield_timeout = null;
+        this.yield_channel.port1.onmessage = e => this.yield_callback(e.data);
+    };
+
+    v86.prototype.yield = function(t, tick)
+    {
+        if(!this.yield_channel) return;
+        if(this.yield_timeout !== null)
+        {
+            clearTimeout(this.yield_timeout);
+            this.yield_timeout = null;
+        }
+        if(t < 1)
+        {
+            this.yield_channel.port2.postMessage(tick);
+        }
+        else
+        {
+            this.yield_timeout = setTimeout(() => {
+                this.yield_timeout = null;
+                this.yield_callback(tick);
+            }, t);
+        }
+    };
+
+    v86.prototype.unregister_yield = function()
+    {
+        if(this.yield_timeout !== null) clearTimeout(this.yield_timeout);
+        this.yield_timeout = null;
+        if(this.yield_channel)
+        {
+            this.yield_channel.port1.onmessage = null;
+            this.yield_channel.port1.close();
+            this.yield_channel.port2.close();
+            this.yield_channel = null;
+        }
+        ++this.tick_counter;
+    };
+}
 else if(typeof Worker !== "undefined")
 {
     // XXX: This has a slightly lower throughput compared to window.postMessage
