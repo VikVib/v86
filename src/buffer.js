@@ -7,6 +7,58 @@ const BLOCK_SIZE = 256;
 
 const ASYNC_SAFE = false;
 
+// Optional bounded cache for automatically cached, clean disk reads.
+// Explicitly cached blocks (e.g. the MBR) and guest writes are never evicted.
+/**
+ * @param {Object} buffer
+ * @param {number|undefined} budget
+ */
+function configure_read_cache(buffer, budget)
+{
+    if(budget === undefined) return buffer;
+    if(!Number.isFinite(budget) || budget < 0)
+    {
+        throw new RangeError("read_cache_bytes must be a non-negative finite number");
+    }
+    buffer.read_cache_limit = Math.floor(budget / BLOCK_SIZE);
+    buffer.read_cache_order = new Map();
+    buffer.cache_reads = buffer.read_cache_limit > 0;
+    return buffer;
+}
+
+/**
+ * @param {Object} buffer
+ * @param {number} index
+ * @param {!Uint8Array} data
+ */
+function cache_clean_block(buffer, index, data)
+{
+    const order = buffer.read_cache_order;
+    if(order)
+    {
+        if(!buffer.read_cache_limit) return;
+        if(order.size >= buffer.read_cache_limit)
+        {
+            const oldest = order.keys().next().value;
+            order.delete(oldest);
+            buffer.block_cache.delete(oldest);
+        }
+        order.set(index, true);
+    }
+    buffer.block_cache.set(index, data.slice());
+}
+
+function touch_clean_block(buffer, index)
+{
+    const order = buffer.read_cache_order;
+    if(order && order.delete(index)) order.set(index, true);
+}
+
+function pin_cached_block(buffer, index)
+{
+    if(buffer.read_cache_order) buffer.read_cache_order.delete(index);
+}
+
 /**
  * Synchronous access to ArrayBuffer
  * @constructor
@@ -121,6 +173,10 @@ function AsyncXHRBuffer(filename, size, fixed_chunk_size)
 
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
+    /** @type {number} */
+    this.read_cache_limit = 0;
+    /** @type {?Map<number, boolean>} */
+    this.read_cache_order = null;
 
     this.fixed_chunk_size = fixed_chunk_size;
     this.cache_reads = !!fixed_chunk_size; // TODO: could also be useful in other cases (needs testing)
@@ -160,6 +216,12 @@ AsyncXHRBuffer.prototype.get_from_cache = function(offset, len)
         {
             return;
         }
+    }
+
+    // Only promote on a complete hit.
+    if(this.read_cache_order)
+    {
+        for(let i = 0; i < number_of_blocks; i++) touch_clean_block(this, block_index + i);
     }
 
     if(number_of_blocks === 1)
@@ -249,6 +311,7 @@ AsyncXHRBuffer.prototype.get_and_cache = function(offset, len, fn, options)
             {
                 this.block_cache.set(start_block + i, block.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
             }
+            pin_cached_block(this, start_block + i);
         }
 
         fn(block);
@@ -291,6 +354,7 @@ AsyncXHRBuffer.prototype.set = function(start, data, fn)
             block.set(data_slice);
         }
 
+        pin_cached_block(this, start_block + i);
         this.block_cache_is_write.add(start_block + i);
     }
 
@@ -318,10 +382,11 @@ AsyncXHRBuffer.prototype.handle_read = function(offset, len, block)
         if(cached_block)
         {
             block.set(cached_block, i * BLOCK_SIZE);
+            touch_clean_block(this, start_block + i);
         }
         else if(this.cache_reads)
         {
-            this.block_cache.set(start_block + i, block.slice(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
+            cache_clean_block(this, start_block + i, block.subarray(i * BLOCK_SIZE, (i + 1) * BLOCK_SIZE));
         }
     }
 };
@@ -392,6 +457,7 @@ AsyncXHRBuffer.prototype.set_state = function(state)
     const block_cache = state[0];
     this.block_cache.clear();
     this.block_cache_is_write.clear();
+    if(this.read_cache_order) this.read_cache_order.clear();
 
     for(const [index, block] of block_cache)
     {
@@ -428,6 +494,10 @@ export function AsyncXHRPartfileBuffer(filename, size, fixed_chunk_size, partfil
 
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
+    /** @type {number} */
+    this.read_cache_limit = 0;
+    /** @type {?Map<number, boolean>} */
+    this.read_cache_order = null;
 
     this.byteLength = size;
     this.fixed_chunk_size = fixed_chunk_size;
@@ -524,8 +594,9 @@ AsyncXHRPartfileBuffer.prototype.get = function(offset, len, fn, options)
                             block = new Uint8Array(decompressed);
                         }
 
-                        blocks.set(block, i * this.fixed_chunk_size);
+                        // Merge guest writes before copying this part into the result.
                         this.handle_read((start_index + i) * this.fixed_chunk_size, this.fixed_chunk_size|0, block);
+                        blocks.set(block, i * this.fixed_chunk_size);
 
                         finished++;
                         if(finished === total_count)
@@ -648,6 +719,10 @@ export function AsyncFileBuffer(file)
 
     this.block_cache = new Map();
     this.block_cache_is_write = new Set();
+    /** @type {number} */
+    this.read_cache_limit = 0;
+    /** @type {?Map<number, boolean>} */
+    this.read_cache_order = null;
 
     this.onload = undefined;
     this.onprogress = undefined;
@@ -765,7 +840,7 @@ export function buffer_from_object(obj, zstd_decompress_worker)
 
         if(is_async)
         {
-            return new AsyncFileBuffer(obj.buffer);
+            return configure_read_cache(new AsyncFileBuffer(obj.buffer), obj["read_cache_bytes"]);
         }
         else
         {
@@ -778,11 +853,11 @@ export function buffer_from_object(obj, zstd_decompress_worker)
 
         if(obj.use_parts)
         {
-            return new AsyncXHRPartfileBuffer(obj.url, obj.size, obj.fixed_chunk_size, false, zstd_decompress_worker);
+            return configure_read_cache(new AsyncXHRPartfileBuffer(obj.url, obj.size, obj.fixed_chunk_size, false, zstd_decompress_worker), obj["read_cache_bytes"]);
         }
         else
         {
-            return new AsyncXHRBuffer(obj.url, obj.size, obj.fixed_chunk_size);
+            return configure_read_cache(new AsyncXHRBuffer(obj.url, obj.size, obj.fixed_chunk_size), obj["read_cache_bytes"]);
         }
     }
     else
