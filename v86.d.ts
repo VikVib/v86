@@ -357,6 +357,9 @@ type V86NetworkDevice =
  * Emulator instance constructor options.
  */
 export interface V86Options {
+    /** Virtual CPU count. Only one CPU is supported until SMP is implemented. */
+    cpu_count?: 1;
+
     /**
      * Reference to the v86 wasm exported function.
      */
