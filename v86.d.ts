@@ -38,6 +38,13 @@ type V86AsyncFileImage =
          * Fixed chunk size, useful with `use_parts: true` for GitHub Pages users.
          */
         fixed_chunk_size?: number;
+
+        /**
+         * Optional budget for automatically cached clean disk reads, in bytes.
+         * Omit to preserve upstream behavior; zero disables automatic read caching.
+         * Explicitly pinned blocks and guest writes are excluded from this budget.
+         */
+        read_cache_bytes?: number;
     };
 
 /**
