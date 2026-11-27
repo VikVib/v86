@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
+import { readFile as read_file } from "node:fs/promises";
 
 const root = new URL("../../", import.meta.url);
 const mode = process.env.BROWSEROS_BUILD || "debug";
 const wasm_name = { debug: "v86-debug.wasm", release: "v86.wasm", fallback: "v86-fallback.wasm" }[mode];
 assert(wasm_name, "Unknown BROWSEROS_BUILD");
 const { V86 } = mode === "debug" ? await import("../../src/main.js") : await import("../../build/libv86.mjs");
-const bytes = await readFile(new URL("build/" + wasm_name, root));
+const bytes = await read_file(new URL("build/" + wasm_name, root));
 assert(WebAssembly.validate(bytes), "WASM module must validate");
 
 // Minimal 1.44 MB floppy with a tiny real-mode guest program. It reports
