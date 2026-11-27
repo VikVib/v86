@@ -304,7 +304,12 @@ V86.prototype.continue_init = async function(emulator, options)
         this.absolute_pointer_enabled = enabled;
     }, this);
 
-    if(screen_options.container)
+    // Experimental Worker-owned emulator supplies a DOM-free screen adapter.
+    if(options["worker_screen_adapter"])
+    {
+        this.screen_adapter = options["worker_screen_adapter"];
+    }
+    else if(screen_options.container)
     {
         this.screen_adapter = new ScreenAdapter(screen_options,
             () => this.v86.cpu.devices.vga && this.v86.cpu.devices.vga.screen_fill_buffer(),
