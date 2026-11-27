@@ -126,6 +126,13 @@ export type ScreenConfig =
         use_graphical_text?: boolean;
 
         /**
+         * Experimental host framebuffer renderer. WebGL falls back to Canvas 2D
+         * if unavailable or lost. Does not accelerate guest OpenGL or Direct3D.
+         * @default "canvas"
+         */
+        renderer?: "canvas" | "webgl";
+
+        /**
          * Use ANSI Truecolor codes for text mode output.
          * @default false
          */
