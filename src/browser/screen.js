@@ -224,7 +224,10 @@ export function ScreenAdapter(options, screen_fill_buffer, request_full_redraw)
         software_canvas.height = graphic_screen.height;
         software_canvas.style.cssText = graphic_screen.style.cssText;
         graphic_context.imageSmoothingEnabled = false;
-        graphic_screen.parentNode.replaceChild(software_canvas, graphic_screen);
+        if(graphic_screen.parentNode)
+        {
+            graphic_screen.parentNode.replaceChild(software_canvas, graphic_screen);
+        }
         graphic_screen = software_canvas;
         gpu.destroy();
         gpu = null;
@@ -687,12 +690,9 @@ export function ScreenAdapter(options, screen_fill_buffer, request_full_redraw)
 
     this.destroy = function()
     {
-        if(gpu)
-        {
-            graphic_screen.removeEventListener("webglcontextlost", fallback_to_canvas);
-            gpu.destroy();
-            gpu = null;
-        }
+        // Restore the original 2D canvas before another VM reuses this container.
+        // A canvas that has acquired a WebGL context cannot acquire a 2D context.
+        if(gpu) fallback_to_canvas();
         if(timer_id)
         {
             cancelAnimationFrame(timer_id);
