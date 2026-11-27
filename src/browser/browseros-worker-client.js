@@ -1,3 +1,4 @@
+/* global structuredClone */
 import "../main.js";
 import { Bus } from "../bus.js";
 import { ScreenAdapter } from "./screen.js";
